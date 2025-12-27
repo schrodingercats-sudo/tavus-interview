@@ -37,7 +37,7 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
   const [cameraOn, setCameraOn] = useState(true);
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState('INITIALIZING');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null); // New error state
   const [volume, setVolume] = useState(0); 
   const [logs, setLogs] = useState<string[]>(['> SYSTEM_READY']);
   
@@ -129,23 +129,15 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
     setStatus('CONNECTING_TO_SATELLITE...');
     setLogs(['> SYSTEM_INIT']);
 
-    try {
-        // --- API Key & Auth Check ---
-        // If running in an environment that requires key selection (like IDX/AI Studio)
-        if ((window as any).aistudio && (window as any).aistudio.hasSelectedApiKey) {
-            const hasKey = await (window as any).aistudio.hasSelectedApiKey();
-            if (!hasKey) {
-                 setStatus("WAITING_FOR_KEY");
-                 await (window as any).aistudio.openSelectKey();
-            }
-        }
-        
-        // Final check for environment variable
-        if (!process.env.API_KEY || process.env.API_KEY === '') {
-            throw new Error("API Key not found. Please ensure you have selected a key or configured process.env.API_KEY.");
-        }
+    // 2. Check API Key
+    if (!process.env.API_KEY) {
+        setError("Missing API_KEY in environment variables.");
+        setStatus("CONFIG_ERROR");
+        return;
+    }
 
-      // Audio Contexts - Create on user gesture
+    try {
+      // Audio Contexts
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
       
@@ -216,7 +208,7 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
           onerror: (err) => {
             console.error("Gemini Live API Error:", err);
             setStatus('ERROR_CONNECTION_LOST');
-            setError(err.message || "Network Error. Please check your API key/permissions.");
+            setError(err.message || "Network Error: The connection to the AI was lost.");
             cleanupResources();
           }
         }
@@ -245,20 +237,17 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
         const base64 = arrayBufferToBase64(pcmData.buffer);
 
         if (sessionRef.current) {
-            sessionRef.current
-                .then(session => {
-                    session.sendRealtimeInput({
-                        media: {
-                            mimeType: 'audio/pcm;rate=16000',
-                            data: base64
-                        }
-                    }).catch((e: any) => {
-                         // Silent catch: triggers if session closes while processing
-                    });
-                })
-                .catch((err) => {
-                    // Silent catch: triggers if initial connection failed
+            sessionRef.current.then(session => {
+                session.sendRealtimeInput({
+                    media: {
+                        mimeType: 'audio/pcm;rate=16000',
+                        data: base64
+                    }
+                }).catch((e: any) => {
+                    // Log silent send errors usually due to closing socket
+                    console.debug("Send failed (expected during close):", e);
                 });
+            });
         }
       };
       
@@ -285,10 +274,8 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
                           mimeType: 'image/jpeg',
                           data: base64Image
                       }
-                  }).catch((e: any) => {
-                      // Silent catch for video send failures
-                  });
-              }).catch(() => { /* Silent catch */ });
+                  }).catch((e: any) => console.debug("Video send failed:", e));
+              });
           }
 
       }, 1000);
@@ -296,7 +283,7 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
     } catch (e: any) {
       console.error("Failed to initialize session", e);
       setStatus('INIT_FAILED');
-      setError(e.message || "Failed to connect. Please check permissions and API key.");
+      setError(e.message || "Failed to access camera/microphone or connect.");
       cleanupResources();
     }
   };
@@ -344,7 +331,7 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
                                 <AlertTriangle className="text-red-500 w-8 h-8" />
                             </div>
                             <h2 className="font-serif text-3xl mb-2 text-deep-black">Connection Interrupted</h2>
-                            <p className="font-sans text-red-600 mb-6 font-bold text-sm bg-red-50 p-2 border border-red-200 break-words">
+                            <p className="font-sans text-red-600 mb-6 font-bold text-sm bg-red-50 p-2 border border-red-200">
                                 {error}
                             </p>
                             <div className="flex flex-col gap-3">
