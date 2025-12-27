@@ -1,0 +1,8 @@
+{
+  "name": "Gemini Studio Landing Page",
+  "description": "A high-end, grainy retro-futurist SaaS landing page with a waterfall layout, retro computer aesthetics, and massive typography.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
