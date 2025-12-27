@@ -3,7 +3,7 @@ import type { PageView } from '../App';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { 
   Mic, MicOff, Video as VideoIcon, VideoOff, PhoneOff, 
-  MessageSquare, Activity, Wifi, Terminal, User, AlertTriangle
+  MessageSquare, Activity, Wifi, Terminal, User
 } from 'lucide-react';
 
 interface AiMeetingProps {
@@ -37,53 +37,18 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
   const [cameraOn, setCameraOn] = useState(true);
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState('INITIALIZING');
-  const [error, setError] = useState<string | null>(null); // New error state
-  const [volume, setVolume] = useState(0); 
+  const [volume, setVolume] = useState(0); // For visualizer
   const [logs, setLogs] = useState<string[]>(['> SYSTEM_READY']);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  
-  // Refs for cleanup
-  const sessionRef = useRef<Promise<any> | null>(null);
+  const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const audioInputContextRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const intervalRef = useRef<any>(null);
-
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
   // Helper to add logs
   const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 50));
-
-  // --- Cleanup Function ---
-  const cleanupResources = () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (processorRef.current) {
-          processorRef.current.disconnect();
-          processorRef.current = null;
-      }
-      if (sourceRef.current) {
-          sourceRef.current.disconnect();
-          sourceRef.current = null;
-      }
-      if (streamRef.current) {
-          streamRef.current.getTracks().forEach(t => t.stop());
-          streamRef.current = null;
-      }
-      if (audioInputContextRef.current) {
-          audioInputContextRef.current.close();
-          audioInputContextRef.current = null;
-      }
-      if (audioContextRef.current) {
-          audioContextRef.current.close();
-          audioContextRef.current = null;
-      }
-      setConnected(false);
-  };
 
   // --- 1. Audio Output Handling ---
   const playAudioChunk = async (base64Audio: string) => {
@@ -91,6 +56,9 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
     
     try {
       const arrayBuffer = base64ToUint8Array(base64Audio).buffer;
+      
+      // Manual PCM decoding since standard decodeAudioData expects file headers (WAV/MP3)
+      // Gemini sends raw PCM 16-bit 24kHz
       const dataInt16 = new Int16Array(arrayBuffer);
       const sampleRate = 24000;
       const numChannels = 1;
@@ -106,6 +74,12 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
       const source = audioContextRef.current.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(audioContextRef.current.destination);
+      
+      // Simple visualizer hook
+      const analyser = audioContextRef.current.createAnalyser();
+      source.connect(analyser); // Connect to analyser
+      // We aren't actively reading this analyser for the UI in this simplified version, 
+      // but we set a 'speaking' state based on playback.
       
       const currentTime = audioContextRef.current.currentTime;
       const startTime = Math.max(nextStartTimeRef.current, currentTime);
@@ -123,20 +97,9 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
 
   // --- 2. Initialize Session ---
   const startSession = async () => {
-    // 1. Reset state
-    cleanupResources();
-    setError(null);
-    setStatus('CONNECTING_TO_SATELLITE...');
-    setLogs(['> SYSTEM_INIT']);
-
-    // 2. Check API Key
-    if (!process.env.API_KEY) {
-        setError("Missing API_KEY in environment variables.");
-        setStatus("CONFIG_ERROR");
-        return;
-    }
-
     try {
+      setStatus('CONNECTING_TO_SATELLITE...');
+      
       // Audio Contexts
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
@@ -146,15 +109,12 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
         audio: {
           sampleRate: 16000,
           channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true
         }, 
         video: {
             width: 640,
             height: 480
         } 
       });
-      streamRef.current = stream;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -180,23 +140,29 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
             setConnected(true);
             setStatus('SECURE_CONNECTION_ESTABLISHED');
             addLog('> LINK_ESTABLISHED');
+            addLog('> AUDIO_UPLINK_ACTIVE');
+            addLog('> VIDEO_UPLINK_ACTIVE');
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Audio
+            // Handle Audio Output
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio) {
                await playAudioChunk(base64Audio);
+               // Simple volume simulation for UI
                setVolume(Math.random() * 0.5 + 0.5); 
                setTimeout(() => setVolume(0), 200);
             }
-            // Interrupt
+
+            // Handle Interruption
             if (message.serverContent?.interrupted) {
               addLog('> INTERRUPTED');
               sourcesRef.current.forEach(source => source.stop());
               sourcesRef.current.clear();
               nextStartTimeRef.current = 0;
             }
-            // Turn Complete
+
+            // Log Text Turn (if available via transcription - normally requires extra config, 
+            // but we use the turnComplete signal to guess state)
             if (message.serverContent?.turnComplete) {
                 addLog('> TURN_COMPLETE');
             }
@@ -206,96 +172,101 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
             setConnected(false);
           },
           onerror: (err) => {
-            console.error("Gemini Live API Error:", err);
+            console.error(err);
             setStatus('ERROR_CONNECTION_LOST');
-            setError(err.message || "Network Error: The connection to the AI was lost.");
-            cleanupResources();
+            addLog(`> ERROR: ${err.message}`);
           }
         }
       });
       
-      sessionRef.current = sessionPromise;
+      sessionRef.current = sessionPromise; // Store promise to chain sends
 
       // --- 3. Input Audio Pipeline ---
-      audioInputContextRef.current = new AudioContext({ sampleRate: 16000 });
-      const source = audioInputContextRef.current.createMediaStreamSource(stream);
-      const processor = audioInputContextRef.current.createScriptProcessor(4096, 1, 1);
-      
-      sourceRef.current = source;
-      processorRef.current = processor;
+      const audioInputContext = new AudioContext({ sampleRate: 16000 });
+      const source = audioInputContext.createMediaStreamSource(stream);
+      const processor = audioInputContext.createScriptProcessor(4096, 1, 1);
       
       processor.onaudioprocess = async (e) => {
         if (!micOn) return; 
         
         const inputData = e.inputBuffer.getChannelData(0);
+        // Convert Float32 to Int16 PCM
         const pcmData = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
+            // Clamp and scale
             const s = Math.max(-1, Math.min(1, inputData[i]));
             pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
         
+        // Base64 Encode
         const base64 = arrayBufferToBase64(pcmData.buffer);
 
-        if (sessionRef.current) {
-            sessionRef.current.then(session => {
-                session.sendRealtimeInput({
-                    media: {
-                        mimeType: 'audio/pcm;rate=16000',
-                        data: base64
-                    }
-                }).catch((e: any) => {
-                    // Log silent send errors usually due to closing socket
-                    console.debug("Send failed (expected during close):", e);
-                });
+        // Send to Gemini
+        sessionPromise.then(session => {
+            session.sendRealtimeInput({
+                media: {
+                    mimeType: 'audio/pcm;rate=16000',
+                    data: base64
+                }
             });
-        }
+        });
       };
       
       source.connect(processor);
-      processor.connect(audioInputContextRef.current.destination);
+      processor.connect(audioInputContext.destination);
 
       // --- 4. Input Video Pipeline ---
-      intervalRef.current = setInterval(async () => {
+      const intervalId = setInterval(async () => {
           if (!cameraOn || !videoRef.current || !canvasRef.current) return;
           
           const ctx = canvasRef.current.getContext('2d');
           if (!ctx) return;
           
-          canvasRef.current.width = videoRef.current.videoWidth / 2;
+          canvasRef.current.width = videoRef.current.videoWidth / 2; // Downscale for bandwidth
           canvasRef.current.height = videoRef.current.videoHeight / 2;
           ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
           
           const base64Image = canvasRef.current.toDataURL('image/jpeg', 0.6).split(',')[1];
           
-          if (sessionRef.current) {
-              sessionRef.current.then(session => {
-                  session.sendRealtimeInput({
-                      media: {
-                          mimeType: 'image/jpeg',
-                          data: base64Image
-                      }
-                  }).catch((e: any) => console.debug("Video send failed:", e));
+          sessionPromise.then(session => {
+              session.sendRealtimeInput({
+                  media: {
+                      mimeType: 'image/jpeg',
+                      data: base64Image
+                  }
               });
-          }
+          });
 
-      }, 1000);
+      }, 1000); // 1 FPS is enough for context
 
-    } catch (e: any) {
+      return () => {
+          clearInterval(intervalId);
+          processor.disconnect();
+          source.disconnect();
+          stream.getTracks().forEach(t => t.stop());
+          audioContextRef.current?.close();
+          audioInputContext.close();
+      };
+
+    } catch (e) {
       console.error("Failed to initialize session", e);
       setStatus('INIT_FAILED');
-      setError(e.message || "Failed to access camera/microphone or connect.");
-      cleanupResources();
     }
   };
 
   useEffect(() => {
+    // Only auto-start if user permits? For now, we wait for user to click "Start" 
+    // to respect autoplay policies, or we can try auto-starting if this component 
+    // is rendered after a user interaction.
+    // Let's add a button to start.
     return () => {
-       cleanupResources();
+       // Cleanup logic is inside the startSession closure, 
+       // but we need global cleanup here if the component unmounts.
+       if (audioContextRef.current) audioContextRef.current.close();
     };
   }, []);
 
   const handleEndCall = () => {
-    cleanupResources();
     onNavigate('user-dashboard');
   };
 
@@ -306,7 +277,7 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
       <div className="h-16 bg-white border-b-2 border-black flex items-center justify-between px-6 z-10 shrink-0">
           <div className="flex items-center gap-4">
                <div className="flex items-center gap-2 px-2 py-1 bg-black text-white font-mono text-xs font-bold border-2 border-transparent">
-                   <div className={`w-2 h-2 rounded-full ${connected ? 'bg-tavus-green animate-pulse' : error ? 'bg-red-500' : 'bg-yellow-500'}`}></div>
+                   <div className={`w-2 h-2 rounded-full ${connected ? 'bg-tavus-green animate-pulse' : 'bg-red-500'}`}></div>
                    {status}
                </div>
           </div>
@@ -320,53 +291,24 @@ export const AiMeeting: React.FC<AiMeetingProps> = ({ onNavigate }) => {
       {/* Main Workspace */}
       <div className="flex-1 p-6 flex flex-col md:flex-row gap-6 overflow-hidden relative">
           
-          {/* OVERLAY MODAL */}
+          {/* Overlay for Start */}
           {!connected && status !== 'CONNECTING_TO_SATELLITE...' && (
-              <div className="absolute inset-0 z-50 bg-cream/90 backdrop-blur-sm flex items-center justify-center p-4">
-                  <div className="window-border bg-white p-8 max-w-md text-center shadow-hard-lg animate-in fade-in zoom-in duration-200">
-                      
-                      {error ? (
-                        <>
-                             <div className="w-16 h-16 bg-red-100 mx-auto mb-6 flex items-center justify-center border-2 border-red-500 rounded-full">
-                                <AlertTriangle className="text-red-500 w-8 h-8" />
-                            </div>
-                            <h2 className="font-serif text-3xl mb-2 text-deep-black">Connection Interrupted</h2>
-                            <p className="font-sans text-red-600 mb-6 font-bold text-sm bg-red-50 p-2 border border-red-200">
-                                {error}
-                            </p>
-                            <div className="flex flex-col gap-3">
-                                <button 
-                                    onClick={startSession}
-                                    className="w-full bg-black text-white border-2 border-black py-3 font-bold uppercase tracking-widest hover:bg-gray-800 transition-all shadow-hard"
-                                >
-                                    Retry Connection
-                                </button>
-                                <button 
-                                    onClick={() => onNavigate('user-dashboard')}
-                                    className="w-full bg-white text-black border-2 border-black py-3 font-bold uppercase tracking-widest hover:bg-gray-100 transition-all"
-                                >
-                                    Return to Dashboard
-                                </button>
-                            </div>
-                        </>
-                      ) : (
-                        <>
-                            <div className="w-16 h-16 bg-black mx-auto mb-6 flex items-center justify-center">
-                                <Terminal className="text-tavus-green w-8 h-8" />
-                            </div>
-                            <h2 className="font-serif text-4xl mb-2">Ready to begin?</h2>
-                            <p className="font-sans text-gray-600 mb-8">
-                                The AI interviewer will analyze your video and audio in real-time. 
-                                Find a quiet space and ensure your camera is enabled.
-                            </p>
-                            <button 
-                                onClick={startSession}
-                                className="w-full bg-tavus-pink text-black border-2 border-black py-4 font-bold uppercase tracking-widest hover:translate-y-1 hover:shadow-none shadow-hard transition-all"
-                            >
-                                Initialize Session
-                            </button>
-                        </>
-                      )}
+              <div className="absolute inset-0 z-50 bg-cream/90 backdrop-blur-sm flex items-center justify-center">
+                  <div className="window-border bg-white p-8 max-w-md text-center shadow-hard-lg">
+                      <div className="w-16 h-16 bg-black mx-auto mb-6 flex items-center justify-center">
+                          <Terminal className="text-tavus-green w-8 h-8" />
+                      </div>
+                      <h2 className="font-serif text-4xl mb-2">Ready to begin?</h2>
+                      <p className="font-sans text-gray-600 mb-8">
+                          The AI interviewer will analyze your video and audio in real-time. 
+                          Find a quiet space and ensure your camera is enabled.
+                      </p>
+                      <button 
+                        onClick={startSession}
+                        className="w-full bg-tavus-pink text-black border-2 border-black py-4 font-bold uppercase tracking-widest hover:translate-y-1 hover:shadow-none shadow-hard transition-all"
+                      >
+                          Initialize Session
+                      </button>
                   </div>
               </div>
           )}
